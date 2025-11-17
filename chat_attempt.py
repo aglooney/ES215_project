@@ -59,9 +59,12 @@ if not weather_features:
 # Optional: target encoding of CEG mean (fixed effect)
 ceg_mean_map = df.groupby(PLANT_ID_COL)[TARGET_COL].mean().to_dict()
 df["ceg_encoded"] = df[PLANT_ID_COL].map(ceg_mean_map)
+df["gen_lag1"] = df.groupby(PLANT_ID_COL)[TARGET_COL].shift(1)
+df["gen_lag2"] = df.groupby(PLANT_ID_COL)[TARGET_COL].shift(2)
+df['gen_lag7'] = df.groupby(PLANT_ID_COL)[TARGET_COL].shift(7)
 
 # Full feature set
-X_cols = weather_features + ["ceg_encoded"]
+X_cols = weather_features + ["ceg_encoded", "gen_lag1", "gen_lag2", "gen_lag7"]
 
 # Fill NaNs using median imputation
 df[X_cols] = df[X_cols].fillna(df[X_cols].median(numeric_only=True))

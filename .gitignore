@@ -1,4 +1,165 @@
-*.csv
+##############################################
+# PYTHON / JUPYTER
+##############################################
+
+# Bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments (macOS, Windows, conda, uv)
+venv/
+.venv/
+env/
+.es215_env/
+.es215_project/
+*.env/
+*.venv/
+*.conda/
+es215_env/
+es215_project/
+*es215_env/
+*es215_project/
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Jupyter Lab workspace junk
+*/.virtual_documents/
+
+# Python packaging
+dist/
+build/
+*.egg-info/
+
+##############################################
+# OPERATING SYSTEM / EDITORS
+##############################################
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# VS Code settings
+.vscode/
+.history/
+
+##############################################
+# SECRET CONFIGURATION
+##############################################
+
+# Environment variables
+.env
+*.env
+.env.*
+secrets/
+secrets/*
+
+# GCP credentials
+*.json
+service_account.json
+*gcp*credentials*
+*key*.json
+
+##############################################
+# DATA FILES (Your Project)
+##############################################
+
+# Raw or intermediate data
+data/*.csv
+data/*.CSV
+data/*.xlsx
+data/*.parquet
+data/*.feather
+data/*.pkl
+data/*.npz
+
+# Processed intermediate products
+data/merged_*/ 
+data/*weather*
+data/*generation*
+data/*transmission*
+
+# Large geodata files
+*.geojson
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+
+##############################################
+# MACHINE LEARNING PIPELINE
+##############################################
+
+# Cached models or artifacts
+models/*
+!models/README.md
+
+# Chroma or vector DB
+chroma/
+chroma_storage/
+chroma_storage_backup/
+
+# ML logs or temporary outputs
+logs/
+*.log
+*.out
+
+##############################################
+# PANDAPOWER / POWER SYSTEM MODELS
+##############################################
+
+# Network exports
+*.pp
+*.json
 *.xlsx
+
+# Temporary OPF results
+opf_results/
+pf_results/
+results/
+
+##############################################
+# DOCKER / GCP DEPLOYMENT
+##############################################
+
+# Docker artifact files
+**/Dockerfile~
+docker-compose.override.yml
+
+# Docker build output
+docker-build/
+.tmp_build/
+
+# Cloud SQL proxy tmp dirs
+cloudsql-proxy*
+
+##############################################
+# OTHER TEMPORARY FILES
+##############################################
+
+# Plot outputs
+figures/
+plots/
+*.png
+*.svg
 *.pdf
-*.nc
+
+# Temporary working files
+tmp/
+temp/
+scratch/
+*.bak
+*.tmp
+
+##############################################
+# IDE / PROJECT MISC
+############################

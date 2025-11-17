@@ -43,13 +43,31 @@ print("Applying lat/long grid transformation")
 assert weather_data.duplicated(subset=["latitude", "longitude", "date"]).sum() == 0
 
 
-
-
-keep_static_cols = ["subsys_name", "state_name", "plant_opn_mode", "plant_type", "fuel_type", "ons_id", "ceg"]
+keep_static_cols = [
+    "subsys_id",
+    "subsys_name",
+    "state_id",
+    "state_name",
+    "plant_opn_mode",
+    "plant_type",
+    "fuel_type",
+    "ons_id",
+    "ceg",
+]
 print("Computing Daily Generation")
 daily_gen = (gen_data.groupby(["ceg", "latitude", "longitude", "date"], as_index=False)["gen_val(MW)"].sum())
 gen_static = gen_data.groupby("ceg").first().reset_index()[keep_static_cols]
 daily_gen = daily_gen.merge(gen_static, on="ceg", how='left', validate='m:m')
+
+# Add normalized region columns for downstream aggregation
+daily_gen["subsystem"] = (
+    daily_gen["subsys_name"]
+    .astype(str)
+    .str.upper()
+    .str.strip()
+    .str.replace("SUDESTE/CENTRO-OESTE", "SUDESTE", regex=False)
+)
+daily_gen["state_abbrev"] = daily_gen["state_id"].astype(str).str.upper().str.strip()
 
 daily_gen = nearest_weather_grid(daily_gen, weather_data,
                                  gen_lat = "latitude", gen_lon="longitude",
