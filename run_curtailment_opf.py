@@ -14,6 +14,7 @@ This script:
 Modify SCENARIO_DATE to choose which gen scenario to use.
 """
 
+import argparse
 import pandas as pd
 import numpy as np
 import pandapower as pp
@@ -25,17 +26,49 @@ import calendar
 # CONFIGURATION
 # ============================================================
 
-DEMAND_PATH  = "data/demand_data/demand_projection_clean.csv"       # The file you uploaded
-SCENARIO_GEN = "models/scenarios/gen_subsystem_2020-12-10.parquet"  # adjust as needed
+parser = argparse.ArgumentParser(description="DC OPF with subsystem demand and generation.")
+parser.add_argument("--demand-path", default="data/demand_data/demand_projection_clean.csv")
+parser.add_argument("--generation-path", default="data/merged_generation_weather.csv")
+parser.add_argument("--year", type=int, default=2020)
+parser.add_argument("--month", type=int, default=12)
+parser.add_argument("--demand-scaling", type=float, default=1.3)
+parser.add_argument("--gen-scale-mean", type=float, default=1.0)
+parser.add_argument("--gen-scale-std", type=float, default=0.0)
+parser.add_argument("--seed", type=int, default=None)
+parser.add_argument("--results-path", default="results/curtailment_results.csv")
+args = parser.parse_args()
+
+DEMAND_PATH = args.demand_path
+GENERATION_DATA = args.generation_path
 
 NETWORK_PATH = "models/pandapower_snapshots/brazil_network_with_subsys_generation.json"
 
 # Demand parameters
-DEMAND_SCALING = 1.3   # peak-hour multiplier
+DEMAND_SCALING = args.demand_scaling   # peak-hour multiplier
 SUBSYS_COL = "subsystem"
 
 # Generation column (actual or ML)
-GEN_COL = "gen_total_mw"     # could switch to "gen_ml_mw"
+GEN_COL = "gen_total_mw"     # kept for compatibility if scenario files are used
+
+PROXY_COST = 50.0  # Eur/MW cost so renewables dispatch first
+
+
+def monthly_generation_avg(path, year, month):
+    df = pd.read_csv(path, parse_dates=["date"])
+    mask = (df["date"].dt.year == year) & (df["date"].dt.month == month)
+    df = df.loc[mask]
+    if df.empty:
+        raise ValueError(f"No generation data for {year}-{month:02d}.")
+    df["subsystem"] = (
+        df["subsys_name"]
+        .astype(str)
+        .str.upper()
+        .str.strip()
+        .str.replace("SUDESTE/CENTRO-OESTE", "SUDESTE")
+    )
+    agg = df.groupby("subsystem")["gen_val(MW)"].sum()
+    hours = pd.Period(year=year, month=month, freq="M").days_in_month * 24
+    return (agg / hours).to_dict()
 
 # ============================================================
 # LOAD NETWORK
@@ -50,26 +83,7 @@ print(f"  - {len(net.sgen)} generators\n")
 
 
 # ============================================================
-# LOAD GENERATION SCENARIO
 # ============================================================
-
-print("⚡ Loading generation scenario...")
-gen_df = pd.read_parquet(SCENARIO_GEN)
-
-print(gen_df.columns)
-print(gen_df.head())
-
-# Expected columns: ["subsystem", "gen_total_mw", ...]
-if SUBSYS_COL not in gen_df.columns or GEN_COL not in gen_df.columns:
-    raise ValueError("Generation scenario file missing required columns.")
-
-subsys_gen = gen_df.set_index(SUBSYS_COL)[GEN_COL].to_dict()
-
-print("  Generation (MW) by subsystem:")
-print(subsys_gen)
-print()
-
-
 # ============================================================
 # LOAD MONTHLY DEMAND & CONVERT TO MW  (NUMERIC MONTH VERSION)
 # ============================================================
@@ -109,8 +123,8 @@ print("Unique subsystems:", df_demand["subsystem"].unique())
 # ----------------------------
 # Choose which year/month to run
 # ----------------------------
-YEAR = 2020
-MONTH = 12   # numeric: 12 = December
+YEAR = args.year
+MONTH = args.month   # numeric: 12 = December
 
 df_month = df_demand[(df_demand["year"] == YEAR) &
                      (df_demand["month"] == MONTH)]
@@ -145,6 +159,42 @@ print(subsys_demand_mw)
 print()
 
 
+# ============================================================
+# LOAD GENERATION SCENARIO (monthly average from merged data)
+# ============================================================
+
+print("⚡ Aggregating generation for selected month...")
+subsys_gen = monthly_generation_avg(GENERATION_DATA, year=YEAR, month=MONTH)
+
+print("  Avg generation (MW) by subsystem:")
+print(subsys_gen)
+print()
+
+# Apply generation uncertainty if requested
+rng = np.random.default_rng(args.seed)
+if args.gen_scale_std > 0:
+    scale_info = {}
+    for subsys, val in subsys_gen.items():
+        factor = max(rng.normal(args.gen_scale_mean, args.gen_scale_std), 0)
+        subsys_gen[subsys] = val * factor
+        scale_info[subsys] = factor
+    print("  Applied stochastic scaling factors:")
+    print(scale_info)
+    print()
+
+# Compute proxy requirements per subsystem (domestic only)
+proxy_generation_mw = {}
+for subsys, demand_mw in subsys_demand_mw.items():
+    if subsys == "PARAGUAI":
+        continue
+    gen_mw = subsys_gen.get(subsys, 0.0)
+    proxy_generation_mw[subsys] = max(demand_mw - gen_mw, 0.0)
+
+print("  Proxy generation targets (MW):")
+print(proxy_generation_mw)
+print()
+
+
 
 
 # ============================================================
@@ -163,8 +213,34 @@ for _, sgen_row in net.sgen.iterrows():
 
 print("  Hub buses:", hub_lookup, "\n")
 
+# Add proxy conventional generators so total supply can meet demand
+proxy_names = []
+for subsys, pmax in proxy_generation_mw.items():
+    if pmax <= 0:
+        continue
+    if subsys not in hub_lookup:
+        print(f"  ⚠ Cannot place proxy generator for {subsys}; missing hub bus.")
+        continue
+    name = f"GEN_CONV_{subsys}"
+    pp.create_sgen(
+        net,
+        bus=hub_lookup[subsys],
+        p_mw=0.0,
+        max_p_mw=pmax,
+        min_p_mw=0.0,
+        name=name,
+        type="conv",
+        controllable=True,
+    )
+    proxy_names.append(name)
+
+if proxy_names:
+    print(f"  Added proxy generators: {proxy_names}\n")
+
 # Add loads at hub buses
 for subsys, p_mw in subsys_demand_mw.items():
+    if subsys == "PARAGUAI":
+        continue
     if subsys not in hub_lookup:
         print(f"  ⚠ Subsystem {subsys} missing hub bus, skipping load.")
         continue
@@ -182,7 +258,10 @@ print(f"  Added {len(net.load)} loads.\n")
 print("🎯 Setting generator limits...")
 
 for i, row in net.sgen.iterrows():
-    subsys = row["name"].replace("GEN_", "")
+    name = str(row["name"])
+    if name.startswith("GEN_CONV_"):
+        continue  # proxy generators already configured
+    subsys = name.replace("GEN_", "")
     if subsys in subsys_gen:
         pmax = subsys_gen[subsys]
         net.sgen.at[i, "max_p_mw"] = pmax
@@ -233,11 +312,13 @@ pp.create_poly_cost(
 )
 
 for idx in net.sgen.index:
+    name = str(net.sgen.at[idx, "name"])
+    cost = PROXY_COST if name.startswith("GEN_CONV_") else GEN_COST
     pp.create_poly_cost(
         net,
         element=idx,
         et="sgen",
-        cp1_eur_per_mw=GEN_COST,
+        cp1_eur_per_mw=cost,
         cp0_eur=0.0
     )
 
@@ -257,12 +338,20 @@ ensure_scaling(net.gen)
 ensure_scaling(net.shunt)
 ensure_scaling(net.storage)
 
+if "min_q_mvar" not in net.sgen.columns:
+    net.sgen["min_q_mvar"] = 0.0
+if "max_q_mvar" not in net.sgen.columns:
+    net.sgen["max_q_mvar"] = 0.0
+net.sgen["controllable"] = True
+
+if "controllable" not in net.load.columns:
+    net.load["controllable"] = False
 
 
 print("⚙️ Running DC–OPF...")
 
 try:
-    pp.runopp(net, calculate_voltage_angles=True)
+    pp.rundcopp(net, verbose=False)
     print("  DC–OPF solved successfully.\n")
 except Exception as e:
     print("❌ OPF failed.")
@@ -296,5 +385,22 @@ print(df_curta)
 print("\n")
 
 # Save results
-df_curta.to_csv("results/curtailment_results.csv", index=False)
-print("💾 Saved: results/curtailment_results.csv")
+df_curta.to_csv(args.results_path, index=False)
+print(f"💾 Saved: {args.results_path}")
+def monthly_generation_avg(path, year, month):
+    df = pd.read_csv(path, parse_dates=["date"])
+    mask = (df["date"].dt.year == year) & (df["date"].dt.month == month)
+    df = df.loc[mask]
+    if df.empty:
+        raise ValueError(f"No generation data for {year}-{month:02d}.")
+    df["subsystem"] = (
+        df["subsys_name"]
+        .astype(str)
+        .str.upper()
+        .str.strip()
+        .str.replace("SUDESTE/CENTRO-OESTE", "SUDESTE")
+    )
+    agg = df.groupby("subsystem")["gen_val(MW)"].sum()
+    hours = pd.Period(year=year, month=month, freq="M").days_in_month * 24
+    avg_mw = (agg / hours).to_dict()
+    return avg_mw
