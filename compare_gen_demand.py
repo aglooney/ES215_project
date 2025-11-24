@@ -79,6 +79,8 @@ def load_generation(path, start_date, end_date):
 
 
 def compare_levels(demand_df, gen_df):
+    demand_df = demand_df[demand_df["subsystem"] != "PARAGUAI"]
+    gen_df = gen_df[gen_df["subsystem"] != "PARAGUAI"]
     combo = pd.merge(demand_df, gen_df, on="subsystem", how="outer")
     combo = combo.fillna(
         {
@@ -127,7 +129,7 @@ def parse_args():
     parser.add_argument(
         "--demand-scaling",
         type=float,
-        default=1.0,
+        default=1.3,
         help="Multiplier applied to average hourly demand to approximate peak.",
     )
     parser.add_argument(
