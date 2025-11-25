@@ -1,6 +1,6 @@
 import pandas as pd
 
-input_csv = "data/all_generation_data.csv"
+input_csv = "data/all_generation_data_v2.csv"
 
 df = pd.read_csv(input_csv)
 
@@ -35,12 +35,10 @@ def convert_latlon(x):
 
     return x_float
 
-
-
 # Convert latitude
 df["latitude"] = df["latitude"].apply(convert_latlon)
 
 # Convert longitude
 df["longitude"] = df["longitude"].apply(convert_latlon)
 
-df.to_csv("data/all_generation_data.csv", index=False)
+df.to_csv("data/all_generation_data_v2.csv", index=False)

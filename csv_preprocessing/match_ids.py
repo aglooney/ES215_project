@@ -13,4 +13,4 @@ df_coord = pd.read_csv("data/generation_coordinates_fixed.csv")
 
 df_merged = df_gen.merge(df_coord[["ceg", "latitude", "longitude"]], on="ceg", how="left")
 
-df_merged.to_csv("data/all_generation_data.csv", index=False)
+df_merged.to_csv("data/all_generation_data_v2.csv", index=False)

@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import pandas as pd
 
 
@@ -173,6 +174,11 @@ def parse_args():
         type=Path,
         help="Optional CSV output path.",
     )
+    parser.add_argument(
+        "--plot-path",
+        type=Path,
+        help="Optional path for a total-gap plot (PNG).",
+    )
     return parser.parse_args()
 
 
@@ -233,6 +239,25 @@ def main():
         annual.to_csv(args.output.with_suffix(".annual.csv"), index=False)
         print(f"\nSaved monthly detail to {args.output}")
         print(f"Saved annual summary to {args.output.with_suffix('.annual.csv')}")
+
+    if args.plot_path:
+        total_gap = summary[summary["subsystem"] == "TOTAL"].sort_values("month_start")
+        plt.figure(figsize=(10, 5))
+        plt.plot(
+            total_gap["month_start"],
+            total_gap["avg_gap_mw"],
+            marker="o",
+            label="Gen - Demand gap",
+        )
+        plt.axhline(0, color="gray", linestyle="--", linewidth=1)
+        plt.xlabel("Month")
+        plt.ylabel("Average gap (MW)")
+        plt.title("Total monthly generation-demand gap")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.legend()
+        plt.savefig(args.plot_path)
+        print(f"Saved gap plot to {args.plot_path}")
 
 
 if __name__ == "__main__":
