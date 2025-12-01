@@ -41,6 +41,18 @@ parser.add_argument("--gen-scale-mean", type=float, default=1.0)
 parser.add_argument("--gen-scale-std", type=float, default=0.0)
 parser.add_argument("--seed", type=int, default=None)
 parser.add_argument("--results-path", default="results/curtailment_results.csv")
+parser.add_argument(
+    "--min-gen-frac",
+    type=float,
+    default=0.1,
+    help="Minimum dispatch fraction (portion of pmax) to represent must-run generation.",
+)
+parser.add_argument(
+    "--line-loading-percent",
+    type=float,
+    default=100.0,
+    help="Global maximum loading percentage for all lines.",
+)
 args = parser.parse_args()
 
 DEMAND_PATH = args.demand_path
@@ -91,6 +103,8 @@ print("  Loaded network with:")
 print(f"  - {len(net.bus)} buses")
 print(f"  - {len(net.line)} lines")
 print(f"  - {len(net.gen)} generators\n")
+if "max_loading_percent" in net.line.columns:
+    net.line["max_loading_percent"] = args.line_loading_percent
 
 
 # ============================================================
@@ -222,12 +236,13 @@ gen_indices = {}
 for subsys, pmax in subsys_gen.items():
     if subsys not in bus_lookup:
         continue
+    min_output = max(pmax * args.min_gen_frac, 0.0)
     idx = pp.create_gen(
         net,
         bus=bus_lookup[subsys],
         p_mw=pmax,
         vm_pu=1.0,
-        min_p_mw=0.0,
+        min_p_mw=min_output,
         max_p_mw=pmax,
         name=f"GEN_{subsys}",
         controllable=True,
@@ -259,7 +274,7 @@ print("🎯 Setting generator limits...")
 for subsys, idx in gen_indices.items():
     pmax = subsys_gen.get(subsys, 0.0)
     net.gen.at[idx, "max_p_mw"] = pmax
-    net.gen.at[idx, "min_p_mw"] = 0.0
+    net.gen.at[idx, "min_p_mw"] = max(pmax * args.min_gen_frac, 0.0)
     net.gen.at[idx, "p_mw"] = pmax
     net.gen.at[idx, "in_service"] = True
     net.gen.at[idx, "controllable"] = True
