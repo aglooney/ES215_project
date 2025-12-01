@@ -19,7 +19,6 @@ import pandas as pd
 import numpy as np
 import pandapower as pp
 from pandapower.pypower import idx_gen
-from pandapower.networks import case9
 import calendar
 
 # ============================================================
@@ -28,20 +27,38 @@ import calendar
 
 parser = argparse.ArgumentParser(description="DC OPF with subsystem demand and generation.")
 parser.add_argument("--demand-path", default="data/demand_data/demand_projection_clean.csv")
-parser.add_argument("--generation-path", default="data/merged_generation_weather.csv")
+parser.add_argument("--generation-path", default="data/merged_generation_weather_v2.csv")
 parser.add_argument("--year", type=int, default=2020)
 parser.add_argument("--month", type=int, default=12)
-parser.add_argument("--demand-scaling", type=float, default=1.3)
+parser.add_argument("--demand-scaling", type=float, default=1.0)
+parser.add_argument(
+    "--allow-slack-imports",
+    action="store_true",
+    help="Allow the slack bus to inject/absorb power. "
+    "If omitted, total subsystem generation must equal subsystem demand exactly.",
+)
 parser.add_argument("--gen-scale-mean", type=float, default=1.0)
 parser.add_argument("--gen-scale-std", type=float, default=0.0)
 parser.add_argument("--seed", type=int, default=None)
 parser.add_argument("--results-path", default="results/curtailment_results.csv")
+parser.add_argument(
+    "--min-gen-frac",
+    type=float,
+    default=0.1,
+    help="Minimum dispatch fraction (portion of pmax) to represent must-run generation.",
+)
+parser.add_argument(
+    "--line-loading-percent",
+    type=float,
+    default=100.0,
+    help="Global maximum loading percentage for all lines.",
+)
 args = parser.parse_args()
 
 DEMAND_PATH = args.demand_path
 GENERATION_DATA = args.generation_path
 
-NETWORK_PATH = "models/pandapower_snapshots/brazil_network_with_subsys_generation.json"
+NETWORK_PATH = "models/brazil_5bus_network.json"
 
 # Demand parameters
 DEMAND_SCALING = args.demand_scaling   # peak-hour multiplier
@@ -76,10 +93,18 @@ def monthly_generation_avg(path, year, month):
 
 print("🔌 Loading network...")
 net = pp.from_json(NETWORK_PATH)
+net.load.drop(net.load.index, inplace=True)
+net.gen.drop(net.gen.index, inplace=True)
+net.sgen.drop(net.sgen.index, inplace=True)
+if not net.poly_cost.empty:
+    net.poly_cost.drop(net.poly_cost.index, inplace=True)
+
 print("  Loaded network with:")
 print(f"  - {len(net.bus)} buses")
 print(f"  - {len(net.line)} lines")
-print(f"  - {len(net.sgen)} generators\n")
+print(f"  - {len(net.gen)} generators\n")
+if "max_loading_percent" in net.line.columns:
+    net.line["max_loading_percent"] = args.line_loading_percent
 
 
 # ============================================================
@@ -145,9 +170,7 @@ days = calendar.monthrange(YEAR, MONTH)[1]
 hours = days * 24
 
 df_subsys["P_avg"] = df_subsys["MWh"] / hours
-
-DEMAND_SCALING = 1.3     # peak-hour approximation
-df_subsys["P_peak"] = df_subsys["P_avg"] * DEMAND_SCALING
+df_subsys["P_peak"] = df_subsys["P_avg"] * args.demand_scaling
 
 subsys_demand_mw = dict(zip(df_subsys["subsystem"], df_subsys["P_peak"]))
 
@@ -182,17 +205,6 @@ if args.gen_scale_std > 0:
     print(scale_info)
     print()
 
-# Compute proxy requirements per subsystem (domestic only)
-proxy_generation_mw = {}
-for subsys, demand_mw in subsys_demand_mw.items():
-    if subsys == "PARAGUAI":
-        continue
-    gen_mw = subsys_gen.get(subsys, 0.0)
-    proxy_generation_mw[subsys] = max(demand_mw - gen_mw, 0.0)
-
-print("  Proxy generation targets (MW):")
-print(proxy_generation_mw)
-print()
 
 
 
@@ -203,48 +215,50 @@ print()
 
 print("🔗 Attaching subsystem demand to network...")
 
-# Build mapping from subsystem name to hub bus using sgens
-hub_lookup = {}
-for _, sgen_row in net.sgen.iterrows():
-    name = str(sgen_row["name"])  # e.g. "GEN_NORTE"
-    if name.startswith("GEN_"):
-        subsys = name.replace("GEN_", "").upper()
-        hub_lookup[subsys] = sgen_row["bus"]
+bus_lookup = {}
+for name in ["NORDESTE", "NORTE", "SUDESTE", "SUL", "PARAGUAI"]:
+    match = net.bus[net.bus["name"] == f"BUS_{name}"]
+    if match.empty:
+        raise ValueError(f"Bus BUS_{name} missing in network.")
+    bus_lookup[name] = match.index[0]
 
-print("  Hub buses:", hub_lookup, "\n")
+net.ext_grid.drop(net.ext_grid.index, inplace=True)
+slack_idx = pp.create_ext_grid(
+    net,
+    bus=bus_lookup["SUDESTE"],
+    vm_pu=1.0,
+    name="SLACK_SUDESTE"
+)
 
-# Add proxy conventional generators so total supply can meet demand
-proxy_names = []
-for subsys, pmax in proxy_generation_mw.items():
-    if pmax <= 0:
+print("  Hub buses:", bus_lookup, "\n")
+
+gen_indices = {}
+for subsys, pmax in subsys_gen.items():
+    if subsys not in bus_lookup:
         continue
-    if subsys not in hub_lookup:
-        print(f"  ⚠ Cannot place proxy generator for {subsys}; missing hub bus.")
-        continue
-    name = f"GEN_CONV_{subsys}"
-    pp.create_sgen(
+    min_output = max(pmax * args.min_gen_frac, 0.0)
+    idx = pp.create_gen(
         net,
-        bus=hub_lookup[subsys],
-        p_mw=0.0,
+        bus=bus_lookup[subsys],
+        p_mw=pmax,
+        vm_pu=1.0,
+        min_p_mw=min_output,
         max_p_mw=pmax,
-        min_p_mw=0.0,
-        name=name,
-        type="conv",
+        name=f"GEN_{subsys}",
         controllable=True,
     )
-    proxy_names.append(name)
+    gen_indices[subsys] = idx
 
-if proxy_names:
-    print(f"  Added proxy generators: {proxy_names}\n")
+proxy_indices = {}
 
 # Add loads at hub buses
 for subsys, p_mw in subsys_demand_mw.items():
     if subsys == "PARAGUAI":
         continue
-    if subsys not in hub_lookup:
-        print(f"  ⚠ Subsystem {subsys} missing hub bus, skipping load.")
+    if subsys not in bus_lookup:
+        print(f"  ⚠ Subsystem {subsys} missing bus, skipping load.")
         continue
-    bus = hub_lookup[subsys]
+    bus = bus_lookup[subsys]
     pp.create_load(net, bus=bus, p_mw=p_mw, q_mvar=0.0, name=f"LOAD_{subsys}")
 
 print(f"  Added {len(net.load)} loads.\n")
@@ -257,38 +271,37 @@ print(f"  Added {len(net.load)} loads.\n")
 
 print("🎯 Setting generator limits...")
 
-for i, row in net.sgen.iterrows():
-    name = str(row["name"])
-    if name.startswith("GEN_CONV_"):
-        continue  # proxy generators already configured
-    subsys = name.replace("GEN_", "")
-    if subsys in subsys_gen:
-        pmax = subsys_gen[subsys]
-        net.sgen.at[i, "max_p_mw"] = pmax
-        net.sgen.at[i, "min_p_mw"] = 0.0
-        net.sgen.at[i, "in_service"] = True
-    else:
-        print(f"  ⚠ Subsystem {subsys} has no gen scenario entry; forcing pmax=0.")
-        net.sgen.at[i, "max_p_mw"] = 0.0
+for subsys, idx in gen_indices.items():
+    pmax = subsys_gen.get(subsys, 0.0)
+    net.gen.at[idx, "max_p_mw"] = pmax
+    net.gen.at[idx, "min_p_mw"] = max(pmax * args.min_gen_frac, 0.0)
+    net.gen.at[idx, "p_mw"] = pmax
+    net.gen.at[idx, "in_service"] = True
+    net.gen.at[idx, "controllable"] = True
+
 
 print("  Generator limits applied.\n")
 
-# Identify SUDESTE hub bus
-sudeste_row = net.sgen[net.sgen["name"] == "GEN_SUDESTE"].iloc[0]
-slack_bus = sudeste_row["bus"]
+total_demand = sum(subsys_demand_mw.values())
+total_generation = sum(net.gen["max_p_mw"])
 
-# Add slack (reference bus)
-slack_idx = pp.create_ext_grid(
-    net,
-    bus=slack_bus,
-    vm_pu=1.0,
-    va_degree=0.0,
-    name="SLACK_SUDESTE"
-)
+if not args.allow_slack_imports and total_generation + 1e-6 < total_demand:
+    deficit = total_demand - total_generation
+    raise ValueError(
+        f"Perfect-demand mode active but available generation ({total_generation:.2f} MW) "
+        f"is lower than demand ({total_demand:.2f} MW). Deficit {deficit:.2f} MW. "
+        "Either lower demand scaling or allow slack imports."
+    )
 
-print(f"Added SLACK at bus {slack_bus}")
+if args.allow_slack_imports:
+    net.ext_grid.loc[slack_idx, ["controllable", "min_p_mw", "max_p_mw"]] = [True, 0.0, 1e6]
+    print("  Slack imports allowed; deficit handled by ext_grid.")
+else:
+    net.ext_grid.loc[slack_idx, ["controllable", "min_p_mw", "max_p_mw"]] = [True, 0.0, 0.0]
+    print("  Perfect-balance mode enabled; slack injection fixed to 0 MW.")
+print(f"  Total demand: {total_demand:.2f} MW | Total generation capacity: {total_generation:.2f} MW\n")
 
-print("HUB LOOKUP KEYS:", sorted(hub_lookup.keys()))
+print("HUB LOOKUP KEYS:", sorted(bus_lookup.keys()))
 print("DEMAND KEYS:", sorted(subsys_demand_mw.keys()))
 
 
@@ -311,17 +324,14 @@ pp.create_poly_cost(
     cp0_eur=0.0
 )
 
-for idx in net.sgen.index:
-    name = str(net.sgen.at[idx, "name"])
-    cost = PROXY_COST if name.startswith("GEN_CONV_") else GEN_COST
+for idx in net.gen.index:
     pp.create_poly_cost(
         net,
         element=idx,
-        et="sgen",
-        cp1_eur_per_mw=cost,
+        et="gen",
+        cp1_eur_per_mw=GEN_COST,
         cp0_eur=0.0
     )
-
 
 # ============================================================
 # RUN DC-OPF
@@ -338,11 +348,11 @@ ensure_scaling(net.gen)
 ensure_scaling(net.shunt)
 ensure_scaling(net.storage)
 
-if "min_q_mvar" not in net.sgen.columns:
-    net.sgen["min_q_mvar"] = 0.0
-if "max_q_mvar" not in net.sgen.columns:
-    net.sgen["max_q_mvar"] = 0.0
-net.sgen["controllable"] = True
+if "min_q_mvar" not in net.gen.columns:
+    net.gen["min_q_mvar"] = 0.0
+if "max_q_mvar" not in net.gen.columns:
+    net.gen["max_q_mvar"] = 0.0
+net.gen["controllable"] = True
 
 if "controllable" not in net.load.columns:
     net.load["controllable"] = False
@@ -366,14 +376,15 @@ print("📉 Curtailment results:")
 
 curtailment_results = []
 
-for i, row in net.sgen.iterrows():
-    subsys = row["name"].replace("GEN_", "")
+for idx, row in net.gen.iterrows():
+    name = str(row["name"])
+    subsys = name.replace("GEN_", "")
     pmax = row["max_p_mw"]
-    pdispatch = net.res_sgen.at[i, "p_mw"]
+    pdispatch = net.res_gen.at[idx, "p_mw"]
     curtailed = pmax - pdispatch
-
     curtailment_results.append({
         "subsystem": subsys,
+        "name": name,
         "pmax_mw": pmax,
         "dispatch_mw": pdispatch,
         "curtailed_mw": curtailed,
@@ -387,20 +398,3 @@ print("\n")
 # Save results
 df_curta.to_csv(args.results_path, index=False)
 print(f"💾 Saved: {args.results_path}")
-def monthly_generation_avg(path, year, month):
-    df = pd.read_csv(path, parse_dates=["date"])
-    mask = (df["date"].dt.year == year) & (df["date"].dt.month == month)
-    df = df.loc[mask]
-    if df.empty:
-        raise ValueError(f"No generation data for {year}-{month:02d}.")
-    df["subsystem"] = (
-        df["subsys_name"]
-        .astype(str)
-        .str.upper()
-        .str.strip()
-        .str.replace("SUDESTE/CENTRO-OESTE", "SUDESTE")
-    )
-    agg = df.groupby("subsystem")["gen_val(MW)"].sum()
-    hours = pd.Period(year=year, month=month, freq="M").days_in_month * 24
-    avg_mw = (agg / hours).to_dict()
-    return avg_mw

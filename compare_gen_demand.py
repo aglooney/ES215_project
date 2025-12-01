@@ -110,7 +110,7 @@ def parse_args():
     )
     parser.add_argument(
         "--gen-path",
-        default=Path("data/merged_generation_weather.csv"),
+        default=Path("data/merged_generation_weather_v2.csv"),
         type=Path,
         help="Merged generation CSV containing subsys_name and gen_val(MW).",
     )
@@ -129,7 +129,7 @@ def parse_args():
     parser.add_argument(
         "--demand-scaling",
         type=float,
-        default=1.3,
+        default=1.0,
         help="Multiplier applied to average hourly demand to approximate peak.",
     )
     parser.add_argument(

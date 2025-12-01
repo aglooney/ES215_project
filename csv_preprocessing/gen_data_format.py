@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 
-input_csv = "data/generation_data/GERACAO_USINA-2_2020.csv"
+input_csv = "data/generation_data/GERACAO_USINA-2_2024_10.csv"
 
 df = pd.read_csv(input_csv, sep=";")
 
@@ -9,7 +9,7 @@ new_cols = ["date","subsys_id","subsys_name","state_id","state_name","plant_opn_
 
 df.columns = new_cols
 
-output_csv = "data/generation_data/generation_2020.csv"
+output_csv = "data/generation_data/generation_2024oct.csv"
 
 df.to_csv(output_csv, index=False)
 

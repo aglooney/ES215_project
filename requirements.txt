@@ -17,3 +17,4 @@ matplotlib==3.10.7
 pandapower>=2.11.0
 geopy==2.4.1
 pyarrow==22.0.0
+tqdm==4.67.1
