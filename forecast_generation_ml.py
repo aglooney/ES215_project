@@ -5,7 +5,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, r2_score
 
 parser = argparse.ArgumentParser(description="Forecast subsystem generation using AR+seasonal regression.")
 parser.add_argument("--input", default="data/merged_generation_weather_v2.csv")
@@ -14,6 +16,32 @@ parser.add_argument("--start-year", type=int, default=2024)
 parser.add_argument("--end-year", type=int, default=2028)
 parser.add_argument("--noise-std", type=float, default=0.05, help="Std dev for multiplicative Gaussian noise.")
 parser.add_argument("--alpha", type=float, default=5.0, help="Ridge regularization strength.")
+parser.add_argument(
+    "--model",
+    choices=["ridge", "hgb"],
+    default="hgb",
+    help="Base regressor: ridge (linear) or hgb (HistGradientBoosting).",
+)
+parser.add_argument("--hgb-learning-rate", type=float, default=0.1, help="HistGB learning rate.")
+parser.add_argument("--hgb-max-depth", type=int, default=6, help="HistGB max depth.")
+parser.add_argument("--hgb-max-leaf-nodes", type=int, default=31, help="HistGB max leaves.")
+parser.add_argument(
+    "--val-start-year",
+    type=int,
+    default=None,
+    help="First historical year reserved for validation metrics (defaults to last available year).",
+)
+parser.add_argument(
+    "--val-end-year",
+    type=int,
+    default=None,
+    help="Last historical year reserved for validation metrics (defaults to same as --val-start-year).",
+)
+parser.add_argument(
+    "--val-leakage",
+    action="store_true",
+    help="When set, validation uses actual lag features (leaky, optimistic metrics).",
+)
 parser.add_argument(
     "--trend-weight",
     type=float,
@@ -77,6 +105,13 @@ for subsys, sub_df in annual_means.groupby("subsystem"):
         slope = 0.0
     annual_trend[subsys] = slope * args.trend_weight
 last_hist_year = annual_means["year"].max()
+default_val_year = args.start_year - 1
+if default_val_year < base_year:
+    default_val_year = last_hist_year
+val_start_year = (
+    args.val_start_year if args.val_start_year is not None else min(last_hist_year, default_val_year)
+)
+val_end_year = args.val_end_year if args.val_end_year is not None else val_start_year
 
 # fill missing weather values with subsystem-month climatology, then global mean
 for feat in WEATHER_FEATURES:
@@ -102,7 +137,24 @@ future_df_template = pd.DataFrame(future_months)
 
 feature_names = ["t", "sin_m", "cos_m", "lag1", "lag12"] + WEATHER_FEATURES
 
+def build_model():
+    if args.model == "ridge":
+        return Ridge(alpha=args.alpha)
+    return HistGradientBoostingRegressor(
+        learning_rate=args.hgb_learning_rate,
+        max_depth=args.hgb_max_depth,
+        max_leaf_nodes=args.hgb_max_leaf_nodes,
+        random_state=args.seed,
+    )
+
+
+def predict_single(model, values: list[float]) -> float:
+    """Predict using a fitted model with feature names preserved."""
+    feature_df = pd.DataFrame([values], columns=feature_names)
+    return float(model.predict(feature_df)[0])
+
 all_rows = []
+val_metrics = []
 for subsys, sub_df in monthly.groupby("subsystem"):
     sub_df = sub_df.reset_index(drop=True)
     sub_df["lag1"] = sub_df["avg_mw"].shift(1)
@@ -112,13 +164,67 @@ for subsys, sub_df in monthly.groupby("subsystem"):
     if train_df.empty:
         continue
 
-    X = train_df[feature_names]
-    y = train_df["avg_mw"].values
-    model = Ridge(alpha=args.alpha)
-    model.fit(X, y)
+    X_all = train_df[feature_names]
+    y_all = train_df["avg_mw"].values
+    model_full = build_model()
+    model_full.fit(X_all, y_all)
+
+    model_eval = None
+    if args.val_leakage:
+        model_eval = model_full
+    elif val_start_year is not None:
+        pre_val_df = train_df[train_df["year"] < val_start_year]
+        if not pre_val_df.empty:
+            model_eval = build_model()
+            model_eval.fit(pre_val_df[feature_names], pre_val_df["avg_mw"].values)
 
     history = sub_df[["year", "month", "avg_mw"]].copy().values.tolist()
     hist_values = [row[2] for row in history]
+
+    if model_eval is not None:
+        val_mask = (sub_df["year"] >= val_start_year) & (sub_df["year"] <= val_end_year)
+        val_rows = sub_df[val_mask].copy()
+        if not val_rows.empty:
+            eval_history = sub_df[sub_df["year"] < val_start_year]["avg_mw"].tolist()
+            if eval_history or args.val_leakage:
+                preds = []
+                actuals = []
+                for _, row in val_rows.iterrows():
+                    year = int(row["year"])
+                    month = int(row["month"])
+                    t = (year - base_year) * 12 + (month - 1)
+                    sin_m = np.sin(2 * np.pi * month / 12)
+                    cos_m = np.cos(2 * np.pi * month / 12)
+                    if args.val_leakage:
+                        lag1 = row["lag1"]
+                        lag12 = row["lag12"]
+                        if pd.isna(lag1) or pd.isna(lag12):
+                            continue
+                    else:
+                        lag1 = eval_history[-1] if eval_history else row["avg_mw"]
+                        lag12 = eval_history[-12] if len(eval_history) >= 12 else eval_history[0]
+                    wx_vals = [row[feat] for feat in WEATHER_FEATURES]
+                    features = [t, sin_m, cos_m, lag1, lag12] + wx_vals
+                    pred = predict_single(model_eval, features)
+                    pred = max(pred, 0.0)
+                    preds.append(pred)
+                    actuals.append(row["avg_mw"])
+                    if not args.val_leakage:
+                        eval_history.append(pred)
+                if preds:
+                    mae = mean_absolute_error(actuals, preds)
+                    r2 = r2_score(actuals, preds)
+                    weight = float(np.sum(actuals))
+                    val_metrics.append(
+                        {
+                            "subsystem": subsys,
+                            "val_start_year": val_start_year,
+                            "val_end_year": val_end_year,
+                            "mae": mae,
+                            "r2": r2,
+                            "weight": weight,
+                        }
+                    )
 
     last_year = int(sub_df["year"].iloc[-1])
     last_month = int(sub_df["month"].iloc[-1])
@@ -145,7 +251,7 @@ for subsys, sub_df in monthly.groupby("subsystem"):
         else:
             wx_vals = {feat: sub_df[feat].mean() for feat in WEATHER_FEATURES}
         features = [t, sin_m, cos_m, lag1, lag12] + [wx_vals[feat] for feat in WEATHER_FEATURES]
-        pred = float(model.predict([features])[0])
+        pred = predict_single(model_full, features)
         pred = max(pred, 0.0)
         if year > last_hist_year:
             trend_years = year - last_hist_year
@@ -176,3 +282,17 @@ output_path = Path(args.output)
 output_path.parent.mkdir(parents=True, exist_ok=True)
 output_df.to_csv(output_path, index=False)
 print(f"Saved generation forecast to {output_path}")
+if val_metrics:
+    metrics_df = pd.DataFrame(val_metrics)
+    print(f"Validation metrics for {val_start_year}-{val_end_year}:")
+    print(metrics_df.sort_values("subsystem").drop(columns=["weight"]).to_string(index=False))
+    total_weight = metrics_df["weight"].sum()
+    if total_weight > 0:
+        weighted_mae = (metrics_df["mae"] * metrics_df["weight"]).sum() / total_weight
+        weighted_r2 = (metrics_df["r2"] * metrics_df["weight"]).sum() / total_weight
+        print(
+            "Weighted (by actual generation) metrics: "
+            f"MAE={weighted_mae:.2f}, R2={weighted_r2:.3f}"
+        )
+else:
+    print("Validation metrics unavailable (insufficient pre-validation data).")

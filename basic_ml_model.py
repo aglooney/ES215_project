@@ -8,15 +8,19 @@ from sklearn.ensemble import RandomForestRegressor
 
 
 
-df = pd.read_csv("data/merged_generation_weather.csv")
+df = pd.read_csv("data/merged_generation_weather_v2.csv")
 
 df = df[df['date']<"2024-03-01"]
+
+df = df.dropna()
 
 plant_types = df['plant_type'].unique()
 
 
 weather_features = ["ETo", "RH", "Rs", "Tmin", "Tmax", "pr", "u2"]
 target = "gen_val(MW)"
+
+
 
 tscv = TimeSeriesSplit(n_splits=5)
 
