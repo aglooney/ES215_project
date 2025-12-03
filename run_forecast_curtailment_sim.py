@@ -18,7 +18,7 @@ parser.add_argument("--scenario", default="referencia", choices=["inferior", "re
 parser.add_argument("--start-year", type=int, default=2025)
 parser.add_argument("--end-year", type=int, default=2028)
 parser.add_argument("--trials", type=int, default=200)
-parser.add_argument("--demand-noise-std", type=float, default=0.03)
+parser.add_argument("--demand-noise-std", type=float, default=0.0)
 parser.add_argument("--gen-noise-std", type=float, default=0.05)
 parser.add_argument("--demand-history", default="data/demand_data/demand_projection_clean.csv")
 parser.add_argument("--generation-history", default="data/merged_generation_weather_v2.csv")
@@ -30,9 +30,27 @@ parser.add_argument("--gen-noise-scale", type=float, default=1.0, help="Scale fa
 parser.add_argument("--allow-slack-imports", action="store_true")
 parser.add_argument("--output", default="results/curtailment_simulations.csv")
 parser.add_argument("--seed", type=int, default=123)
+parser.add_argument(
+    "--storage-source",
+    default=None,
+    help="Subsystem where pseudo-storage absorbs surplus (generation reduced).",
+)
+parser.add_argument(
+    "--storage-target",
+    default=None,
+    help="Subsystem where pseudo-storage re-injects energy (generation increased).",
+)
+parser.add_argument(
+    "--storage-transfer-mw",
+    type=float,
+    default=0.0,
+    help="MW shifted from source to target each month to emulate storage.",
+)
 args = parser.parse_args()
 
 rng = np.random.default_rng(args.seed)
+STORAGE_SOURCE = args.storage_source.upper().strip() if args.storage_source else None
+STORAGE_TARGET = args.storage_target.upper().strip() if args.storage_target else None
 
 def load_network():
     net = pp.from_json(NETWORK_PATH)
@@ -240,10 +258,32 @@ def apply_noise(values, std, cov=None, scale=1.0):
     return noisy
 
 
+def apply_virtual_storage(gen_vals, demand_vals, source, target, amount):
+    if not source or not target or amount <= 0:
+        return gen_vals, 0.0
+    if source == target:
+        return gen_vals, 0.0
+    if source not in gen_vals:
+        return gen_vals, 0.0
+    # limit charging to local surplus to avoid infeasible deficits
+    local_gen = gen_vals.get(source, 0.0)
+    local_demand = demand_vals.get(source, 0.0)
+    surplus = max(local_gen - local_demand, 0.0)
+    if surplus <= 0:
+        return gen_vals, 0.0
+    transfer = min(amount, surplus)
+    if transfer <= 0:
+        return gen_vals, 0.0
+    gen_vals[source] = local_gen - transfer
+    gen_vals[target] = gen_vals.get(target, 0.0) + transfer
+    return gen_vals, transfer
+
+
 def main():
     demand_df, gen_df = load_forecasts()
     records = []
     month_list = list(build_month_range(args.start_year, args.end_year))
+    storage_records = []
     for trial in tqdm(range(1, args.trials + 1)):
         for year, month in month_list:
             dvals, gvals = sample_values(demand_df, gen_df, year, month)
@@ -261,6 +301,18 @@ def main():
                 cov=generation_cov,
                 scale=args.gen_noise_scale,
             )
+            gvals, transferred = apply_virtual_storage(
+                gvals, dvals, STORAGE_SOURCE, STORAGE_TARGET, args.storage_transfer_mw
+            )
+            if transferred > 0:
+                storage_records.append({
+                    "trial": trial,
+                    "year": year,
+                    "month": month,
+                    "transferred_mw": transferred,
+                    "source": STORAGE_SOURCE,
+                    "target": STORAGE_TARGET,
+                })
             result = run_single_month(dvals, gvals, args.allow_slack_imports)
             result["trial"] = trial
             result["year"] = year
@@ -277,6 +329,11 @@ def main():
     summary.to_csv(summary_path, index=False)
     print(f"Saved simulation results to {out_path}")
     print(f"Saved monthly totals to {summary_path}")
+    if storage_records:
+        storage_df = pd.DataFrame(storage_records)
+        storage_path = out_path.with_name(out_path.stem + "_storage.csv")
+        storage_df.to_csv(storage_path, index=False)
+        print(f"Saved storage transfer log to {storage_path}")
 
 
 if __name__ == "__main__":

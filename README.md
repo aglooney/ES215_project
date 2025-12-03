@@ -33,7 +33,7 @@ This README documents the data sources, key scripts, usage examples, and assumpt
 **External source links**
 
 - ONS generation data: https://dados.ons.org.br/dataset/geracao-usina-2/resource/cad39843-ad31-42fc-847c-6a643938f621  
-- Weather netCDF archive: https://ufesbr-my.sharepoint.com/personal/alexandre_xavier_ufes_br/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Falexandre%5Fxavier%5Fufes%5Fbr%2FDocuments%2Fnetcdf%5Ffiles&ga=1  
+- Weather netCDF archive: https://ufesbr-my.sharepoint.com/personal/alexandre_xavier_ufes_br/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Falexandre%5Fxavier%5Fufes%5Fbr%2FDocuments%2Fnetcdf%5Ffiles&ga=1 
 - Generator coordinates: https://dados.ons.org.br/dataset/
 
 ---

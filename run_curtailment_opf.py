@@ -53,6 +53,22 @@ parser.add_argument(
     default=100.0,
     help="Global maximum loading percentage for all lines.",
 )
+parser.add_argument(
+    "--storage-source",
+    default=None,
+    help="Subsystem where simplified storage absorbs energy (generation reduced).",
+)
+parser.add_argument(
+    "--storage-target",
+    default=None,
+    help="Subsystem where simplified storage releases energy (generation increased).",
+)
+parser.add_argument(
+    "--storage-transfer-mw",
+    type=float,
+    default=0.0,
+    help="MW shifted each month from source to target to emulate basic storage.",
+)
 args = parser.parse_args()
 
 DEMAND_PATH = args.demand_path
@@ -67,7 +83,18 @@ SUBSYS_COL = "subsystem"
 # Generation column (actual or ML)
 GEN_COL = "gen_total_mw"     # kept for compatibility if scenario files are used
 
+def normalize_subsystem(name):
+    if not name:
+        return None
+    name = str(name).upper().strip()
+    return name.replace("SUDESTE/CENTRO-OESTE", "SUDESTE")
+
+
 PROXY_COST = 50.0  # Eur/MW cost so renewables dispatch first
+STORAGE_SOURCE = normalize_subsystem(args.storage_source)
+STORAGE_TARGET = normalize_subsystem(args.storage_target)
+
+
 
 
 def monthly_generation_avg(path, year, month):
@@ -83,9 +110,28 @@ def monthly_generation_avg(path, year, month):
         .str.strip()
         .str.replace("SUDESTE/CENTRO-OESTE", "SUDESTE")
     )
-    agg = df.groupby("subsystem")["gen_val(MW)"].sum()
+    df["plant_type"] = df["plant_type"].astype(str).str.upper().str.strip()
     hours = pd.Period(year=year, month=month, freq="M").days_in_month * 24
-    return (agg / hours).to_dict()
+    agg_total = df.groupby("subsystem")["gen_val(MW)"].sum() / hours
+    agg_types = df.groupby(["subsystem", "plant_type"])["gen_val(MW)"].sum() / hours
+    return agg_total.to_dict(), agg_types.to_dict()
+
+
+def apply_virtual_storage(gen_vals, source, target, amount):
+    if not source or not target or amount <= 0:
+        return gen_vals, 0.0
+    if source == target:
+        return gen_vals, 0.0
+    if source not in gen_vals:
+        print(f"⚠️ Storage source {source} missing generation; skipping transfer.")
+        return gen_vals, 0.0
+    available = gen_vals.get(source, 0.0)
+    if available <= 0:
+        return gen_vals, 0.0
+    transfer = min(amount, available)
+    gen_vals[source] = available - transfer
+    gen_vals[target] = gen_vals.get(target, 0.0) + transfer
+    return gen_vals, transfer
 
 # ============================================================
 # LOAD NETWORK
@@ -187,7 +233,7 @@ print()
 # ============================================================
 
 print("⚡ Aggregating generation for selected month...")
-subsys_gen = monthly_generation_avg(GENERATION_DATA, year=YEAR, month=MONTH)
+subsys_gen, plant_type_gen = monthly_generation_avg(GENERATION_DATA, year=YEAR, month=MONTH)
 
 print("  Avg generation (MW) by subsystem:")
 print(subsys_gen)
@@ -201,9 +247,46 @@ if args.gen_scale_std > 0:
         factor = max(rng.normal(args.gen_scale_mean, args.gen_scale_std), 0)
         subsys_gen[subsys] = val * factor
         scale_info[subsys] = factor
-    print("  Applied stochastic scaling factors:")
-    print(scale_info)
-    print()
+        print("  Applied stochastic scaling factors:")
+        print(scale_info)
+        print()
+
+HYDRO_TYPE = "HIDROELÉTRICA"
+NUCLEAR_TYPE = "NUCLEAR"
+
+
+def subsystem_dispatch_bounds(subsys, total_cap):
+    hydro = plant_type_gen.get((subsys, HYDRO_TYPE), 0.0)
+    nuclear = plant_type_gen.get((subsys, NUCLEAR_TYPE), 0.0)
+    other = max(total_cap - hydro - nuclear, 0.0)
+    hydro_min = 0.0
+    hydro_max = hydro
+    max_allowed = total_cap
+    if subsys == "NORTE" and hydro > 0.0:
+        hydro_min = hydro * 0.5
+        hydro_max = hydro * 0.7
+        max_allowed = min(max_allowed, other + nuclear + hydro_max)
+    nuclear_min = nuclear * 0.95
+    min_required = max(total_cap * args.min_gen_frac, hydro_min + nuclear_min)
+    max_allowed = max(min_required, max_allowed)
+    return min_required, max_allowed
+
+dispatch_bounds = {subsys: subsystem_dispatch_bounds(subsys, cap) for subsys, cap in subsys_gen.items()}
+
+transferred = 0.0
+if args.storage_transfer_mw > 0 and STORAGE_SOURCE and STORAGE_TARGET:
+    subsys_gen, transferred = apply_virtual_storage(
+        subsys_gen, STORAGE_SOURCE, STORAGE_TARGET, args.storage_transfer_mw
+    )
+    if transferred > 0:
+        print(
+            f"🪫 Applied basic storage: shifted {transferred:.2f} MW "
+            f"from {STORAGE_SOURCE} to {STORAGE_TARGET}."
+        )
+        print()
+    else:
+        print("⚠️ Storage transfer requested but no energy shifted (check inputs).")
+        print()
 
 
 
@@ -236,14 +319,14 @@ gen_indices = {}
 for subsys, pmax in subsys_gen.items():
     if subsys not in bus_lookup:
         continue
-    min_output = max(pmax * args.min_gen_frac, 0.0)
+    min_output, max_output = dispatch_bounds.get(subsys, (max(pmax * args.min_gen_frac, 0.0), pmax))
     idx = pp.create_gen(
         net,
         bus=bus_lookup[subsys],
         p_mw=pmax,
         vm_pu=1.0,
         min_p_mw=min_output,
-        max_p_mw=pmax,
+        max_p_mw=max_output,
         name=f"GEN_{subsys}",
         controllable=True,
     )
@@ -273,9 +356,10 @@ print("🎯 Setting generator limits...")
 
 for subsys, idx in gen_indices.items():
     pmax = subsys_gen.get(subsys, 0.0)
-    net.gen.at[idx, "max_p_mw"] = pmax
-    net.gen.at[idx, "min_p_mw"] = max(pmax * args.min_gen_frac, 0.0)
-    net.gen.at[idx, "p_mw"] = pmax
+    min_p, max_p = dispatch_bounds.get(subsys, (max(pmax * args.min_gen_frac, 0.0), pmax))
+    net.gen.at[idx, "max_p_mw"] = max_p
+    net.gen.at[idx, "min_p_mw"] = min_p
+    net.gen.at[idx, "p_mw"] = max_p
     net.gen.at[idx, "in_service"] = True
     net.gen.at[idx, "controllable"] = True
 
@@ -363,6 +447,18 @@ print("⚙️ Running DC–OPF...")
 try:
     pp.rundcopp(net, verbose=False)
     print("  DC–OPF solved successfully.\n")
+    if not net.res_line.empty and "max_loading_percent" in net.line.columns:
+        binding = net.res_line["loading_percent"] >= net.line["max_loading_percent"] - 1e-3
+        if binding.any():
+            congested = net.line.loc[binding, ["name", "max_loading_percent"]]
+            flow_vals = net.res_line.loc[binding, "loading_percent"]
+            print("  ⚠️ Binding lines:")
+            for (_, line_row), load in zip(congested.iterrows(), flow_vals):
+                print(f"    {line_row['name']}: loading {load:.1f}% of limit {line_row['max_loading_percent']}%")
+        else:
+            print("  No line hit its loading limit.")
+    else:
+        print("  Line loading data unavailable.")
 except Exception as e:
     print("❌ OPF failed.")
     raise e
