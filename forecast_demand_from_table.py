@@ -8,6 +8,7 @@ import pandas as pd
 
 parser = argparse.ArgumentParser(description="Create seasonal demand forecasts using table scenarios.")
 parser.add_argument("--historical-path", default="data/demand_data/demand_projection_clean.csv")
+parser.add_argument("--scenario", choices=["inferior","referencia","superior"], default="referencia")
 parser.add_argument("--hist-start-year", type=int, default=2020)
 parser.add_argument("--hist-end-year", type=int, default=2024)
 parser.add_argument("--start-year", type=int, default=2025)
@@ -79,24 +80,25 @@ seasonal_factors = compute_seasonal_factors(
 )
 
 rows = []
-for scenario, subsystems in scenario_data.items():
-    for subsystem, info in subsystems.items():
-        base_mw = info["value_2025"] * 1000.0
-        growth = info["growth"]
-        factors = seasonal_factors.get(subsystem, {m: 1.0 for m in range(1, 13)})
-        for year in range(START_YEAR, END_YEAR + 1):
-            for month in range(1, 13):
-                months_since_start = (year - START_YEAR) * 12 + (month - 1)
-                trend = (1.0 + growth) ** (months_since_start / 12.0)
-                seasonal = factors.get(month, 1.0)
-                demand = base_mw * trend * seasonal
-                rows.append({
-                    "scenario": scenario,
-                    "subsystem": subsystem,
-                    "year": year,
-                    "month": month,
-                    "demand_mw": demand,
-                })
+scenario = args.scenario
+subsystems = scenario_data[scenario]
+for subsystem, info in subsystems.items():
+    base_mw = info["value_2025"] * 1000.0
+    growth = info["growth"]
+    factors = seasonal_factors.get(subsystem, {m: 1.0 for m in range(1, 13)})
+    for year in range(START_YEAR, END_YEAR + 1):
+        for month in range(1, 13):
+            months_since_start = (year - START_YEAR) * 12 + (month - 1)
+            trend = (1.0 + growth) ** (months_since_start / 12.0)
+            seasonal = factors.get(month, 1.0)
+            demand = base_mw * trend * seasonal
+            rows.append({
+                "scenario": scenario,
+                "subsystem": subsystem,
+                "year": year,
+                "month": month,
+                "demand_mw": demand,
+            })
 
 OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 pd.DataFrame(rows).to_csv(OUTPUT, index=False)

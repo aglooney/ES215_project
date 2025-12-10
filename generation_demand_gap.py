@@ -137,13 +137,13 @@ def parse_args():
     parser.add_argument(
         "--demand-path",
         type=Path,
-        default="data/demand_data/demand_projection_clean.csv",
+        default="data/demand_data/demand_projection_2025_2028.csv",
         help="Monthly demand CSV.",
     )
     parser.add_argument(
         "--gen-path",
         type=Path,
-        default="data/merged_generation_weather.csv",
+        default="results/generation_forecast_2025_2028.csv",
         help="Daily generation CSV.",
     )
     parser.add_argument(

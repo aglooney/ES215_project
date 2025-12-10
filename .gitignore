@@ -74,6 +74,8 @@ service_account.json
 ##############################################
 
 # Raw or intermediate data
+*.csv
+*.CSV
 data/*.csv
 data/*.CSV
 data/*.xlsx
